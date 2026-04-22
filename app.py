@@ -1,91 +1,116 @@
 import streamlit as st
 import os
 import pandas as pd
-from pathlib import Path
+import time
 
-# Konfigurasi Halaman
-st.set_page_config(page_title="Disk Analyzer Pro", layout="wide")
+# --- Konfigurasi Page ---
+st.set_page_config(page_title="Storage Manager Pro", layout="wide")
 
-def get_size_format(b, factor=1024, suffix="B"):
-    """Mengubah bytes menjadi format yang mudah dibaca (KB, MB, GB)"""
-    for unit in ["", "K", "M", "G", "T", "P"]:
-        if b < factor:
-            return f"{b:.2f}{unit}{suffix}"
-        b /= factor
+def get_size_format(b):
+    for unit in ["", "K", "M", "G", "T"]:
+        if b < 1024: return f"{b:.2f}{unit}B"
+        b /= 1024
 
-def scan_directory(path):
+def scan_storage(path, mode="Full Scan"):
     data = []
-    # Menggunakan os.walk untuk menelusuri folder dan subfolder
+    start_time = time.time()
+    
+    # Progress Bar
+    progress_text = "Memulai pemindaian..."
+    bar = st.progress(0, text=progress_text)
+    
+    files_found = 0
     for root, dirs, files in os.walk(path):
         for name in files:
             file_path = os.path.join(root, name)
             try:
-                # Ambil informasi file
-                stats = os.stat(file_path)
-                size = stats.st_size
-                extension = os.path.splitext(name)[1].lower() or "No Extension"
-                
+                size = os.path.getsize(file_path)
+                ext = os.path.splitext(name)[1].lower() or "Unknown"
                 data.append({
                     "Nama File": name,
-                    "Path": file_path,
                     "Ukuran (Bytes)": size,
-                    "Format": extension,
-                    "Ukuran": get_size_format(size)
+                    "Format": ext,
+                    "Path": file_path
                 })
+                files_found += 1
+                # Update progress setiap 500 file agar tidak lag
+                if files_found % 500 == 0:
+                    bar.progress(min(files_found / 10000, 0.99), text=f"Menemukan {files_found} file...")
             except (PermissionError, FileNotFoundError):
                 continue
-    return pd.DataFrame(data)
+    
+    df = pd.DataFrame(data)
+    bar.empty() # Hapus progress bar jika selesai
+    
+    if df.empty:
+        return df
 
-# Antarmuka Pengguna (UI)
-st.title("📂 Disk Storage Analyzer")
-st.markdown("Analisis file besar di penyimpanan lokal Anda dengan detail.")
+    # Logika Pilihan User
+    if mode == "10 Terbesar Saja":
+        return df.nlargest(10, "Ukuran (Bytes)")
+    
+    return df
 
-# Input Path
-target_path = st.text_input("Masukkan Path Folder (Contoh: C:/Users/Documents atau /Users/Name/Downloads):", value=".")
+# --- UI Sidebar ---
+st.sidebar.header("⚙️ Pengaturan Scan")
+drive_path = st.sidebar.text_input("Path Hardisk / Folder:", value="C:/" if os.name == 'nt' else "/")
+scan_mode = st.sidebar.radio("Mode Manajemen:", ["Full Scan", "10 Terbesar Saja"])
+start_btn = st.sidebar.button("Jalankan Pemindaian")
 
-if st.button("Mulai Scanning"):
-    if os.path.exists(target_path):
-        with st.spinner("Sedang memindai file... Harap tunggu..."):
-            df = scan_directory(target_path)
+# --- Main UI ---
+st.title("🗂️ Storage Management Dashboard")
+
+if start_btn:
+    if os.path.exists(drive_path):
+        with st.spinner(f"Sedang menganalisis {drive_path}..."):
+            results = scan_storage(drive_path, mode=scan_mode)
             
-            if not df.empty:
-                # Sorting berdasarkan ukuran terbesar
-                df = df.sort_values(by="Ukuran (Bytes)", ascending=False)
-
-                # Row 1: Ringkasan Statistik
+            if not results.empty:
+                # Kolom format size agar mudah dibaca
+                results["Ukuran Detail"] = results["Ukuran (Bytes)"].apply(get_size_format)
+                
+                # --- Statistik Ringkasan ---
                 col1, col2, col3 = st.columns(3)
-                col1.metric("Total File", len(df))
-                col2.metric("Total Kapasitas", get_size_format(df["Ukuran (Bytes)"].sum()))
-                col3.metric("Jenis File Terdeteksi", len(df["Format"].unique()))
+                with col1:
+                    st.metric("Total File", len(results))
+                with col2:
+                    total_size = results["Ukuran (Bytes)"].sum()
+                    st.metric("Total Penggunaan", get_size_format(total_size))
+                with col3:
+                    st.metric("Mode", scan_mode)
 
-                # Row 2: Visualisasi & Detail
                 st.divider()
-                
-                tab1, tab2 = st.tabs(["📊 Daftar File Detail", "📁 Analisis Format"])
-                
-                with tab1:
-                    st.subheader("Daftar File (Besar ke Kecil)")
-                    # Tampilkan tabel tanpa kolom bytes mentah agar rapi
-                    st.dataframe(df[["Nama File", "Ukuran", "Format", "Path"]], use_container_width=True)
 
-                with tab2:
-                    st.subheader("Distribusi Berdasarkan Jenis File")
-                    type_summary = df.groupby("Format").agg({
-                        "Nama File": "count",
-                        "Ukuran (Bytes)": "sum"
-                    }).rename(columns={"Nama File": "Jumlah File", "Ukuran (Bytes)": "Total Size (Bytes)"})
+                # --- Tampilan Hasil ---
+                if scan_mode == "10 Terbesar Saja":
+                    st.subheader("🚨 10 File Terbesar (Penyebab Disk Penuh)")
+                    # Highlight khusus untuk file raksasa
+                    st.table(results[["Nama File", "Ukuran Detail", "Format", "Path"]])
+                
+                else:
+                    st.subheader("📊 Laporan Lengkap Penyimpanan")
+                    tab1, tab2 = st.tabs(["Daftar Semua File", "Berdasarkan Jenis"])
                     
-                    # Tambahkan kolom size yang mudah dibaca
-                    type_summary["Total Kapasitas"] = type_summary["Total Size (Bytes)"].apply(get_size_format)
-                    st.table(type_summary[["Jumlah File", "Total Kapasitas"]].sort_values(by="Jumlah File", ascending=False))
+                    with tab1:
+                        st.dataframe(results[["Nama File", "Ukuran Detail", "Format", "Path"]].sort_values("Nama File"), use_container_width=True)
+                    
+                    with tab2:
+                        type_analysis = results.groupby("Format").size().reset_index(name="Jumlah")
+                        st.bar_chart(type_analysis.set_index("Format"))
+                        st.dataframe(type_analysis.sort_values("Jumlah", ascending=False), use_container_width=True)
             else:
-                st.warning("Tidak ada file ditemukan atau akses ditolak.")
+                st.error("Tidak dapat membaca data. Pastikan Anda memiliki izin akses pada folder tersebut.")
     else:
-        st.error("Path tidak valid! Pastikan format path benar.")
+        st.error("Path tidak ditemukan. Pastikan format penulisan benar.")
+else:
+    st.info("Silakan tentukan path hardisk di sidebar dan klik 'Jalankan Pemindaian'.")
 
-# CSS Custom untuk mempercantik tampilan
+# --- Custom Clean UI (Sesuai gaya favorit Anda) ---
 st.markdown("""
     <style>
-    .stMetric { background-color: #f0f2f6; padding: 10px; border-radius: 10px; }
+    .stMetric { border: 1px solid #e6e9ef; padding: 15px; border-radius: 5px; background: #ffffff; }
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
     </style>
     """, unsafe_allow_html=True)
