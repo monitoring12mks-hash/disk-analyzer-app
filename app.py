@@ -2,26 +2,61 @@ import streamlit as st
 import os
 import pandas as pd
 import time
+import psutil  # Library baru untuk deteksi drive
 
-# --- Konfigurasi Page ---
-st.set_page_config(page_title="Storage Manager Pro", layout="wide")
+# --- Fungsi Pendukung ---
+def get_available_drives():
+    """Mendeteksi semua drive/partisi yang terpasang di PC"""
+    drives = []
+    partitions = psutil.disk_partitions()
+    for p in partitions:
+        # Hanya ambil drive yang siap (bukan CD-ROM kosong)
+        if os.name == 'nt': # Windows
+            if 'fixed' in p.opts or 'rw' in p.opts:
+                drives.append(p.device)
+        else: # Mac/Linux
+            drives.append(p.mountpoint)
+    return drives
 
 def get_size_format(b):
     for unit in ["", "K", "M", "G", "T"]:
         if b < 1024: return f"{b:.2f}{unit}B"
         b /= 1024
+    return f"{b:.2f}TB"
 
-def scan_storage(path, mode="Full Scan"):
+# --- Konfigurasi Page ---
+st.set_page_config(page_title="Storage Manager Pro", layout="wide")
+
+# --- UI Sidebar ---
+st.sidebar.header("⚙️ Pengaturan Scan")
+
+# 1. Pilih Drive Otomatis
+available_drives = get_available_drives()
+selected_drive = st.sidebar.selectbox("Pilih Hardisk/Drive:", available_drives)
+
+# 2. Pilihan Mode
+scan_mode = st.sidebar.radio("Mode Manajemen:", ["Full Scan", "10 Terbesar Saja"])
+
+# 3. Filter Jenis File (Opsional untuk Full Scan Maksimal)
+enable_filter = st.sidebar.checkbox("Filter Format Tertentu?")
+selected_ext = ""
+if enable_filter:
+    selected_ext = st.sidebar.text_input("Masukkan Ekstensi (Contoh: .mp4, .zip):")
+
+start_btn = st.sidebar.button("Jalankan Pemindaian")
+
+# --- Logika Scan ---
+def scan_storage(path, mode, filter_ext=""):
     data = []
-    start_time = time.time()
-    
-    # Progress Bar
-    progress_text = "Memulai pemindaian..."
-    bar = st.progress(0, text=progress_text)
-    
+    bar = st.progress(0, text="Menyiapkan data...")
     files_found = 0
+    
     for root, dirs, files in os.walk(path):
         for name in files:
+            # Jika filter aktif, lewati file yang tidak sesuai
+            if filter_ext and not name.lower().endswith(filter_ext.lower()):
+                continue
+                
             file_path = os.path.join(root, name)
             try:
                 size = os.path.getsize(file_path)
@@ -33,84 +68,49 @@ def scan_storage(path, mode="Full Scan"):
                     "Path": file_path
                 })
                 files_found += 1
-                # Update progress setiap 500 file agar tidak lag
-                if files_found % 500 == 0:
-                    bar.progress(min(files_found / 10000, 0.99), text=f"Menemukan {files_found} file...")
-            except (PermissionError, FileNotFoundError):
+                if files_found % 1000 == 0:
+                    bar.progress(0.5, text=f"Menganalisis {files_found} file...")
+            except:
                 continue
     
+    bar.empty()
     df = pd.DataFrame(data)
-    bar.empty() # Hapus progress bar jika selesai
-    
-    if df.empty:
-        return df
-
-    # Logika Pilihan User
-    if mode == "10 Terbesar Saja":
+    if mode == "10 Terbesar Saja" and not df.empty:
         return df.nlargest(10, "Ukuran (Bytes)")
-    
     return df
 
-# --- UI Sidebar ---
-st.sidebar.header("⚙️ Pengaturan Scan")
-drive_path = st.sidebar.text_input("Path Hardisk / Folder:", value="C:/" if os.name == 'nt' else "/")
-scan_mode = st.sidebar.radio("Mode Manajemen:", ["Full Scan", "10 Terbesar Saja"])
-start_btn = st.sidebar.button("Jalankan Pemindaian")
-
-# --- Main UI ---
+# --- Main Dashboard ---
 st.title("🗂️ Storage Management Dashboard")
 
 if start_btn:
-    if os.path.exists(drive_path):
-        with st.spinner(f"Sedang menganalisis {drive_path}..."):
-            results = scan_storage(drive_path, mode=scan_mode)
+    with st.spinner(f"Memindai {selected_drive}..."):
+        results = scan_storage(selected_drive, scan_mode, selected_ext)
+        
+        if not results.empty:
+            results["Ukuran Detail"] = results["Ukuran (Bytes)"].apply(get_size_format)
             
-            if not results.empty:
-                # Kolom format size agar mudah dibaca
-                results["Ukuran Detail"] = results["Ukuran (Bytes)"].apply(get_size_format)
-                
-                # --- Statistik Ringkasan ---
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("Total File", len(results))
-                with col2:
-                    total_size = results["Ukuran (Bytes)"].sum()
-                    st.metric("Total Penggunaan", get_size_format(total_size))
-                with col3:
-                    st.metric("Mode", scan_mode)
-
-                st.divider()
-
-                # --- Tampilan Hasil ---
-                if scan_mode == "10 Terbesar Saja":
-                    st.subheader("🚨 10 File Terbesar (Penyebab Disk Penuh)")
-                    # Highlight khusus untuk file raksasa
-                    st.table(results[["Nama File", "Ukuran Detail", "Format", "Path"]])
-                
-                else:
-                    st.subheader("📊 Laporan Lengkap Penyimpanan")
-                    tab1, tab2 = st.tabs(["Daftar Semua File", "Berdasarkan Jenis"])
-                    
-                    with tab1:
-                        st.dataframe(results[["Nama File", "Ukuran Detail", "Format", "Path"]].sort_values("Nama File"), use_container_width=True)
-                    
-                    with tab2:
-                        type_analysis = results.groupby("Format").size().reset_index(name="Jumlah")
-                        st.bar_chart(type_analysis.set_index("Format"))
-                        st.dataframe(type_analysis.sort_values("Jumlah", ascending=False), use_container_width=True)
+            # Statistik Cepat
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Drive", selected_drive)
+            c2.metric("Total File Terdeteksi", len(results))
+            c3.metric("Total Size", get_size_format(results["Ukuran (Bytes)"].sum()))
+            
+            st.divider()
+            
+            if scan_mode == "10 Terbesar Saja":
+                st.subheader("🚨 File Paling Boros Kapasitas")
+                st.table(results[["Nama File", "Ukuran Detail", "Format", "Path"]])
             else:
-                st.error("Tidak dapat membaca data. Pastikan Anda memiliki izin akses pada folder tersebut.")
-    else:
-        st.error("Path tidak ditemukan. Pastikan format penulisan benar.")
-else:
-    st.info("Silakan tentukan path hardisk di sidebar dan klik 'Jalankan Pemindaian'.")
+                st.subheader("📊 Laporan Lengkap")
+                st.dataframe(results[["Nama File", "Ukuran Detail", "Format", "Path"]], use_container_width=True)
+        else:
+            st.warning("Data tidak ditemukan atau izin akses ditolak.")
 
-# --- Custom Clean UI (Sesuai gaya favorit Anda) ---
+# CSS Custom
 st.markdown("""
     <style>
-    .stMetric { border: 1px solid #e6e9ef; padding: 15px; border-radius: 5px; background: #ffffff; }
+    .stMetric { border: 1px solid #eee; padding: 10px; border-radius: 10px; }
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
-    header {visibility: hidden;}
     </style>
     """, unsafe_allow_html=True)
