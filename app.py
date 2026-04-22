@@ -2,16 +2,18 @@ import streamlit as st
 import os
 import psutil
 import pandas as pd
-import time
 
-# --- 1. Fungsi Pendukung ---
+# --- Fungsi Pendukung ---
 def get_drive_list():
     drives = []
     for p in psutil.disk_partitions():
         try:
+            # Mengambil informasi device saja
             usage = psutil.disk_usage(p.mountpoint)
-            label = f"{p.mountpoint} [Total: {usage.total/(1024**3):.1f} GB | Terpakai: {usage.percent}%]"
-            drives.append({"label": label, "path": p.mountpoint})
+            drives.append({
+                "label": f"Drive {p.mountpoint} ({usage.percent}% Terpakai)",
+                "path": p.mountpoint
+            })
         except: continue
     return drives
 
@@ -21,106 +23,94 @@ def get_size_format(b):
         b /= 1024
     return f"{b:.2f}TB"
 
-def run_disk_scan(path, mode):
+@st.fragment # Optimasi agar hanya bagian ini yang terupdate
+def run_scan_logic(path, mode):
     data = []
-    # Placeholder untuk progress agar user tahu app bekerja
-    status_text = st.empty()
     files_found = 0
+    status_placeholder = st.empty()
     
     for root, dirs, files in os.walk(path):
         for name in files:
             file_path = os.path.join(root, name)
             try:
                 size = os.path.getsize(file_path)
-                ext = os.path.splitext(name)[1].lower() or "Unknown"
                 data.append({
                     "Nama File": name,
                     "Ukuran (Bytes)": size,
-                    "Format": ext,
+                    "Format": os.path.splitext(name)[1].lower() or "Lainnya",
                     "Path": file_path
                 })
                 files_found += 1
                 if files_found % 1000 == 0:
-                    status_text.text(f"🔍 Menemukan {files_found} file...")
+                    status_placeholder.text(f"🔍 Memproses... {files_found} file ditemukan")
             except: continue
             
-    status_text.empty()
+    status_placeholder.empty()
     df = pd.DataFrame(data)
     if mode == "10 Terbesar Saja" and not df.empty:
         return df.nlargest(10, "Ukuran (Bytes)")
     return df
 
-# --- 2. Konfigurasi App ---
-st.set_page_config(page_title="Storage Manager Pro", layout="wide")
+# --- Konfigurasi Halaman ---
+st.set_page_config(page_title="Storage Manager", layout="centered")
 
-# Inisialisasi Session State agar data tidak hilang saat diklik
-if 'scan_results' not in st.session_state:
-    st.session_state['scan_results'] = None
+# Inisialisasi State
+if 'scan_data' not in st.session_state:
+    st.session_state.scan_data = None
 
-# --- 3. Sidebar UI ---
-st.sidebar.header("🎛️ Manajemen Storage")
-list_drives = get_drive_list()
+# --- UI UTAMA ---
+st.title("🖥️ Manajemen Penyimpanan")
+st.write("Pilih hardisk yang ingin Anda kelola di bawah ini.")
 
-if list_drives:
-    selected_drive = st.sidebar.selectbox(
-        "Pilih Hardisk / Devices:", 
-        list_drives, 
-        format_func=lambda x: x["label"]
-    )
-    target_path = selected_drive["path"]
-else:
-    target_path = st.sidebar.text_input("Path Manual:", value="C:/")
+# Tampilan Pilihan Drive
+drives = get_drive_list()
+col1, col2 = st.columns([3, 1])
 
-scan_mode = st.sidebar.radio("Mode Scan:", ["10 Terbesar Saja", "Full Scan (Semua File)"])
+with col1:
+    selected_drive = st.selectbox("Daftar Perangkat Terdeteksi:", drives, format_func=lambda x: x["label"])
 
-# TOMBOL ANALISIS
-if st.sidebar.button("🚀 Mulai Analisis"):
-    with st.spinner(f"Sedang memproses {target_path}..."):
-        # Jalankan fungsi scan dan simpan ke session state
-        df_result = run_disk_scan(target_path, scan_mode)
-        st.session_state['scan_results'] = df_result
-        st.session_state['last_scan_path'] = target_path
+with col2:
+    scan_mode = st.selectbox("Mode:", ["10 Terbesar Saja", "Full Scan"])
 
-# --- 4. Main Dashboard ---
-st.title("🖥️ Disk Device Analyzer")
+# Logika Pop-up Persetujuan
+@st.dialog("Persetujuan Akses Penyimpanan")
+def confirm_dialog(path, mode):
+    st.warning(f"Anda akan memindai direktori: **{path}**")
+    st.write("Aplikasi memerlukan izin untuk membaca metadata file. Beberapa file sistem mungkin tidak dapat diakses tanpa izin Administrator.")
+    st.info("Lanjutkan pemindaian?")
+    if st.button("Ya, Saya Setuju & Mulai Scan"):
+        with st.spinner("Menganalisis..."):
+            result = run_scan_logic(path, mode)
+            st.session_state.scan_data = result
+            st.rerun()
 
-if st.session_state['scan_results'] is not None:
-    df = st.session_state['scan_results']
+# Tombol Analisis
+if st.button("🚀 Analisis Sekarang", use_container_width=True):
+    confirm_dialog(selected_drive["path"], scan_mode)
+
+st.divider()
+
+# --- TAMPILAN HASIL (Hanya muncul jika sudah di-scan) ---
+if st.session_state.scan_data is not None:
+    df = st.session_state.scan_data
     
     if not df.empty:
-        # Tambahkan kolom bacaan ukuran
-        df["Ukuran Detail"] = df["Ukuran (Bytes)"].apply(get_size_format)
+        st.success(f"Analisis Selesai! Menemukan {len(df)} file.")
+        df["Kapasitas"] = df["Ukuran (Bytes)"].apply(get_size_format)
         
-        # Row Statistik
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Device", st.session_state['last_scan_path'])
-        c2.metric("Total File", len(df))
-        c3.metric("Total Kapasitas", get_size_format(df["Ukuran (Bytes)"].sum()))
+        # Tampilkan Tabel
+        st.subheader("Detail Penyimpanan")
+        st.dataframe(
+            df[["Nama File", "Kapasitas", "Format", "Path"]].sort_values("Ukuran (Bytes)", ascending=False),
+            use_container_width=True,
+            hide_index=True
+        )
         
-        st.divider()
-
-        # Tampilkan Hasil
-        if len(df) <= 10:
-            st.subheader("🚨 File Terbesar yang Ditemukan")
-            st.table(df[["Nama File", "Ukuran Detail", "Format", "Path"]])
-        else:
-            st.subheader("📊 Laporan Lengkap")
-            st.dataframe(df[["Nama File", "Ukuran Detail", "Format", "Path"]], use_container_width=True)
-            
-        # Tombol Reset
-        if st.button("Clear Results"):
-            st.session_state['scan_results'] = None
+        if st.button("Bersihkan Hasil"):
+            st.session_state.scan_data = None
             st.rerun()
     else:
-        st.warning("Tidak ada file yang ditemukan atau akses ditolak oleh sistem.")
-else:
-    st.info("Pilih drive di sidebar dan klik **Mulai Analisis** untuk melihat detail penyimpanan.")
+        st.error("Akses ditolak atau drive kosong. Coba jalankan aplikasi sebagai Administrator.")
 
-# --- Styling ---
-st.markdown("""
-    <style>
-    .stMetric { border: 1px solid #eee; padding: 15px; border-radius: 10px; background: #fafafa; }
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    </style>
-    """, unsafe_allow_html=True)
+# Sembunyikan Menu Streamlit (Sesuai preferensi Anda)
+st.markdown("<style>#MainMenu {visibility: hidden;} footer {visibility: hidden;}</style>", unsafe_allow_html=True)
